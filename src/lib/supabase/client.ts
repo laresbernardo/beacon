@@ -1,19 +1,18 @@
 import { createClient } from "@supabase/supabase-js";
 import { mockAuth } from "@/lib/mock-auth";
+import { resolveSupabaseMode, SUPABASE_UNCONFIGURED_ERROR } from "./config";
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
-// Check if we have valid Supabase keys
-const isSupabaseConfigured =
-    supabaseUrl &&
-    supabaseAnonKey &&
-    supabaseUrl !== "https://example.supabase.co" &&
-    !supabaseUrl.includes("your-project");
+// Resolved once at module load. The mock backend requires an explicit dev
+// opt-in (NEXT_PUBLIC_ENABLE_MOCK_AUTH=true) and can never engage in
+// production builds; a misconfigured deploy gets a clear unavailable state
+// instead of silently accepting fake local accounts.
+export const supabaseMode = resolveSupabaseMode(process.env);
+export const isSupabaseAvailable = supabaseMode !== "unconfigured";
 
-export const supabase = isSupabaseConfigured
-    ? createClient(supabaseUrl, supabaseAnonKey)
-    : {
+const mockClient = {
         auth: mockAuth,
         from: (table: string) => {
             const chainable = {
@@ -345,3 +344,39 @@ export const supabase = isSupabaseConfigured
             })
         }
     } as any;
+
+// Clear "service unavailable" client: every operation fails loudly with a
+// configuration error instead of silently persisting data to localStorage.
+const unavailableClient = {
+    auth: {
+        signUp: async () => ({ error: { ...SUPABASE_UNCONFIGURED_ERROR }, data: { user: null, session: null } }),
+        signInWithPassword: async () => ({ error: { ...SUPABASE_UNCONFIGURED_ERROR }, data: { user: null, session: null } }),
+        signOut: async () => ({ error: null }),
+        getSession: async () => ({ data: { session: null }, error: { ...SUPABASE_UNCONFIGURED_ERROR } }),
+        getUser: async () => ({ data: { user: null }, error: { ...SUPABASE_UNCONFIGURED_ERROR } }),
+        onAuthStateChange: () => ({ data: { subscription: { unsubscribe: () => { } } } }),
+    },
+    from: () => {
+        throw new Error(SUPABASE_UNCONFIGURED_ERROR.message);
+    },
+    channel: () => ({
+        on: () => ({
+            subscribe: () => ({})
+        })
+    }),
+    removeChannel: () => { },
+    storage: {
+        from: () => ({
+            upload: () => Promise.resolve({ data: null, error: { ...SUPABASE_UNCONFIGURED_ERROR } }),
+            getPublicUrl: () => ({ data: { publicUrl: "" } })
+        })
+    }
+} as any;
+
+export const supabase =
+    supabaseMode === "live"
+        ? createClient(supabaseUrl as string, supabaseAnonKey as string)
+        : supabaseMode === "mock"
+            ? mockClient
+            : unavailableClient;
+
